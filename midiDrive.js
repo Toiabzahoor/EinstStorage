@@ -7,9 +7,64 @@ const SCALE = [
     84
 ];
 
-const DURATIONS = [120, 240, 480, 960];
+const DURATIONS_LEGACY = [120, 240, 480, 960];
+const VELOCITIES_LEGACY = [45, 70, 95, 120];
 
-const VELOCITIES = [45, 70, 95, 120];
+const CHORDS = [
+    {
+        bass: [36, 38, 40, 41, 43, 45, 47, 48, 50, 52, 53, 55, 57, 59, 60, 62],
+        harmony: [48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 71, 72, 74],
+        melody: [60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79, 81, 83, 84, 86],
+        harp: [72, 74, 76, 77, 79, 81, 83, 84, 86, 88, 89, 91, 93, 95, 96, 98]
+    },
+    {
+        bass: [33, 35, 36, 38, 40, 41, 43, 45, 47, 48, 50, 52, 53, 55, 57, 60],
+        harmony: [45, 47, 48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 72],
+        melody: [57, 59, 60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79, 81, 84],
+        harp: [69, 71, 72, 74, 76, 77, 79, 81, 83, 84, 86, 88, 89, 91, 93, 96]
+    },
+    {
+        bass: [29, 33, 36, 38, 41, 43, 45, 47, 48, 50, 53, 55, 57, 60, 62, 65],
+        harmony: [41, 45, 48, 50, 53, 55, 57, 59, 60, 62, 65, 67, 69, 71, 72, 74],
+        melody: [53, 57, 60, 62, 65, 67, 69, 71, 72, 74, 77, 79, 81, 83, 84, 86],
+        harp: [65, 69, 72, 74, 77, 79, 81, 83, 84, 86, 89, 91, 93, 95, 96, 98]
+    },
+    {
+        bass: [31, 35, 38, 41, 43, 45, 47, 48, 50, 53, 55, 57, 59, 62, 65, 67],
+        harmony: [43, 47, 50, 53, 55, 57, 59, 60, 62, 65, 67, 69, 71, 74, 77, 79],
+        melody: [55, 59, 62, 65, 67, 69, 71, 72, 74, 77, 79, 81, 83, 86, 89, 91],
+        harp: [67, 71, 74, 77, 79, 81, 83, 84, 86, 89, 91, 93, 95, 98, 101, 103]
+    }
+];
+
+const VELOCITIES = [50, 75, 95, 115];
+
+const DURATIONS = {
+    bass: [720, 960, 1200, 1440],
+    harmony: [600, 840, 1080, 1320],
+    melody: [240, 360, 480, 600],
+    harp: [180, 240, 300, 360]
+};
+
+const REST_DELAYS = {
+    bass: [240, 480, 720, 960],
+    harmony: [120, 240, 360, 480],
+    melody: [120, 180, 240, 360],
+    harp: [240, 360, 480, 600]
+};
+
+const SLOTS = [
+    { track: 0, part: "bass" },
+    { track: 1, part: "harmony" },
+    { track: 1, part: "harmony" },
+    { track: 2, part: "melody" },
+    { track: 2, part: "melody" },
+    { track: 2, part: "melody" },
+    { track: 3, part: "harp" },
+    { track: 3, part: "harp" }
+];
+
+const PROGRAMS = [42, 48, 40, 46];
 
 function packFile(filename, fileBytes) {
     const nameBytes = new TextEncoder().encode(filename);
@@ -56,7 +111,14 @@ function readVLQ(bytes, offset) {
     return { value, offset };
 }
 
-async function encodeToMidi(blob, onProgress) {
+async function encodeToMidi(blob, onProgress, mode = "polyphonic") {
+    if (mode === "legacy") {
+        return encodeLegacyToMidi(blob, onProgress);
+    }
+    return encodePolyphonicToMidi(blob, onProgress);
+}
+
+async function encodeLegacyToMidi(blob, onProgress) {
     const total = blob.length;
     let trackLen = 7 + 4;
     for (let i = 0; i < total; i++) {
@@ -94,8 +156,8 @@ async function encodeToMidi(blob, onProgress) {
         const b = blob[i];
         const pitch = SCALE[(b >> 4) & 0x0f];
         const durIdx = (b >> 2) & 0x03;
-        const duration = DURATIONS[durIdx];
-        const velocity = VELOCITIES[b & 0x03];
+        const duration = DURATIONS_LEGACY[durIdx];
+        const velocity = VELOCITIES_LEGACY[b & 0x03];
 
         chunk[chunkPos++] = 0x00;
         chunk[chunkPos++] = 0x90;
@@ -113,7 +175,7 @@ async function encodeToMidi(blob, onProgress) {
         chunk[chunkPos++] = pitch;
         chunk[chunkPos++] = 0x00;
 
-        if (onProgress && Date.now() - lastProgressTime > 60) {
+        if (onProgress && Date.now() - lastProgressTime > 50) {
             const pct = Math.round((i / total) * 100);
             onProgress(pct);
             lastProgressTime = Date.now();
@@ -139,10 +201,140 @@ async function encodeToMidi(blob, onProgress) {
     return new Blob(chunks, { type: "audio/midi" });
 }
 
+async function encodePolyphonicToMidi(blob, onProgress) {
+    const total = blob.length;
+    const trackBytes = [[], [], [], []];
+
+    for (let i = 0; i < total; i++) {
+        const slot = SLOTS[i % 8];
+        trackBytes[slot.track].push({ byte: blob[i], chunkIdx: Math.floor(i / 8), part: slot.part });
+    }
+
+    const chunks = [];
+    const headerBuf = new Uint8Array(14);
+    headerBuf.set([0x4d, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00, 0x04, 0x01, 0xe0], 0);
+    chunks.push(headerBuf);
+
+    let lastProgressTime = Date.now();
+
+    for (let t = 0; t < 4; t++) {
+        const items = trackBytes[t];
+        const CHUNK_SIZE = 1024 * 1024;
+        let chunk = new Uint8Array(CHUNK_SIZE);
+        let chunkPos = 0;
+
+        let trkDataLen = (t === 0 ? 7 : 0) + 3 + 4;
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const durIdx = (item.byte >> 2) & 0x03;
+            const duration = DURATIONS[item.part][durIdx];
+            const restDelay = (i === 0) ? (t * 120) : REST_DELAYS[item.part][durIdx];
+            const durVlqLen = duration < 128 ? 1 : (duration < 16384 ? 2 : 3);
+            const delayVlqLen = restDelay < 128 ? 1 : (restDelay < 16384 ? 2 : 3);
+            trkDataLen += delayVlqLen + 3 + durVlqLen + 3;
+        }
+
+        const trkHeader = new Uint8Array(8);
+        trkHeader.set([
+            0x4d, 0x54, 0x72, 0x6b,
+            (trkDataLen >>> 24) & 0xff,
+            (trkDataLen >>> 16) & 0xff,
+            (trkDataLen >>> 8) & 0xff,
+            trkDataLen & 0xff
+        ], 0);
+        chunks.push(trkHeader);
+
+        if (t === 0) {
+            chunk[chunkPos++] = 0x00;
+            chunk[chunkPos++] = 0xff;
+            chunk[chunkPos++] = 0x51;
+            chunk[chunkPos++] = 0x03;
+            chunk[chunkPos++] = 0x08;
+            chunk[chunkPos++] = 0x4d;
+            chunk[chunkPos++] = 0x00;
+        }
+
+        chunk[chunkPos++] = 0x00;
+        chunk[chunkPos++] = 0xc0 | t;
+        chunk[chunkPos++] = PROGRAMS[t];
+
+        for (let i = 0; i < items.length; i++) {
+            if (chunkPos + 18 >= CHUNK_SIZE) {
+                chunks.push(chunk.subarray(0, chunkPos));
+                chunk = new Uint8Array(CHUNK_SIZE);
+                chunkPos = 0;
+            }
+
+            const item = items[i];
+            const b = item.byte;
+            const chordIdx = Math.floor(item.chunkIdx / 2) % 4;
+            const scale = CHORDS[chordIdx][item.part];
+
+            const pitch = scale[(b >> 4) & 0x0f];
+            const durIdx = (b >> 2) & 0x03;
+            const duration = DURATIONS[item.part][durIdx];
+            const velocity = VELOCITIES[b & 0x03];
+            const restDelay = (i === 0) ? (t * 120) : REST_DELAYS[item.part][durIdx];
+
+            const delayBytes = writeVLQ(restDelay);
+            for (let k = 0; k < delayBytes.length; k++) {
+                chunk[chunkPos++] = delayBytes[k];
+            }
+
+            chunk[chunkPos++] = 0x90 | t;
+            chunk[chunkPos++] = pitch;
+            chunk[chunkPos++] = velocity;
+
+            const durBytes = writeVLQ(duration);
+            for (let k = 0; k < durBytes.length; k++) {
+                chunk[chunkPos++] = durBytes[k];
+            }
+
+            chunk[chunkPos++] = 0x80 | t;
+            chunk[chunkPos++] = pitch;
+            chunk[chunkPos++] = 0x00;
+
+            if (onProgress && Date.now() - lastProgressTime > 50) {
+                const completedBytes = t * Math.floor(total / 4) + i;
+                const pct = Math.round((completedBytes / total) * 100);
+                onProgress(pct);
+                lastProgressTime = Date.now();
+                await new Promise(r => setTimeout(r, 0));
+            }
+        }
+
+        if (chunkPos + 4 >= CHUNK_SIZE) {
+            chunks.push(chunk.subarray(0, chunkPos));
+            chunk = new Uint8Array(CHUNK_SIZE);
+            chunkPos = 0;
+        }
+
+        chunk[chunkPos++] = 0x00;
+        chunk[chunkPos++] = 0xff;
+        chunk[chunkPos++] = 0x2f;
+        chunk[chunkPos++] = 0x00;
+
+        if (chunkPos > 0) {
+            chunks.push(chunk.subarray(0, chunkPos));
+        }
+    }
+
+    if (onProgress) onProgress(100);
+    return new Blob(chunks, { type: "audio/midi" });
+}
+
 async function decodeFromMidi(midiBytes, onProgress) {
     const magic = String.fromCharCode(...midiBytes.slice(0, 4));
     if (magic !== "MThd") throw new Error("Not a valid MIDI file!");
 
+    const numTracks = (midiBytes[10] << 8) | midiBytes[11];
+    if (numTracks > 1) {
+        return decodePolyphonicFromMidi(midiBytes, onProgress);
+    }
+    return decodeLegacyFromMidi(midiBytes, onProgress);
+}
+
+async function decodeLegacyFromMidi(midiBytes, onProgress) {
     let offset = 14;
     const trkMagic = String.fromCharCode(...midiBytes.slice(offset, offset + 4));
     if (trkMagic !== "MTrk") throw new Error("Missing MTrk chunk!");
@@ -184,7 +376,7 @@ async function decodeFromMidi(midiBytes, onProgress) {
                     chunk = new Uint8Array(CHUNK_SIZE);
                     chunkPos = 0;
                 }
-                chunk[chunkPos++] = noteToByte(activeNote.pitch, delta, activeNote.velocity);
+                chunk[chunkPos++] = noteToByteLegacy(activeNote.pitch, delta, activeNote.velocity);
                 activeNote = null;
             }
         } else if ((status & 0xf0) === 0x80) {
@@ -196,12 +388,12 @@ async function decodeFromMidi(midiBytes, onProgress) {
                     chunk = new Uint8Array(CHUNK_SIZE);
                     chunkPos = 0;
                 }
-                chunk[chunkPos++] = noteToByte(activeNote.pitch, delta, activeNote.velocity);
+                chunk[chunkPos++] = noteToByteLegacy(activeNote.pitch, delta, activeNote.velocity);
                 activeNote = null;
             }
         }
 
-        if (onProgress && Date.now() - lastProgressTime > 60) {
+        if (onProgress && Date.now() - lastProgressTime > 50) {
             const pct = Math.round(((offset - trackStart) / trackLen) * 100);
             onProgress(pct);
             lastProgressTime = Date.now();
@@ -217,14 +409,127 @@ async function decodeFromMidi(midiBytes, onProgress) {
     return new Blob(decChunks);
 }
 
-function noteToByte(pitch, duration, velocity) {
+function noteToByteLegacy(pitch, duration, velocity) {
     const pitchIdx = SCALE.indexOf(pitch);
-    const durIdx = DURATIONS.indexOf(duration);
-    const velIdx = VELOCITIES.indexOf(velocity);
+    const durIdx = DURATIONS_LEGACY.indexOf(duration);
+    const velIdx = VELOCITIES_LEGACY.indexOf(velocity);
     if (pitchIdx === -1 || durIdx === -1 || velIdx === -1) {
         throw new Error(`Unexpected note values: pitch=${pitch}, dur=${duration}, vel=${velocity}`);
     }
     return (pitchIdx << 4) | (durIdx << 2) | velIdx;
+}
+
+async function decodePolyphonicFromMidi(midiBytes, onProgress) {
+    let offset = 0;
+    const numTracks = (midiBytes[10] << 8) | midiBytes[11];
+    offset = 14;
+
+    const decodedTracks = [];
+    const view = new DataView(midiBytes.buffer, midiBytes.byteOffset, midiBytes.byteLength);
+    let lastProgressTime = Date.now();
+
+    for (let t = 0; t < numTracks; t++) {
+        if (offset >= midiBytes.length) break;
+        const trkMagic = String.fromCharCode(...midiBytes.slice(offset, offset + 4));
+        if (trkMagic !== "MTrk") throw new Error("Missing MTrk chunk at track " + t);
+        const trkLen = view.getUint32(offset + 4, false);
+        offset += 8;
+        const trkEnd = offset + trkLen;
+
+        const trackDecoded = [];
+        let noteIdx = 0;
+        let activeNote = null;
+
+        while (offset < trkEnd && offset < midiBytes.length) {
+            const vlq = readVLQ(midiBytes, offset);
+            const delta = vlq.value;
+            offset = vlq.offset;
+
+            const status = midiBytes[offset++];
+            if (status === 0xff) {
+                const metaType = midiBytes[offset++];
+                const metaLen = readVLQ(midiBytes, offset);
+                offset = metaLen.offset + metaLen.value;
+                if (metaType === 0x2f) break;
+            } else if ((status & 0xf0) === 0xc0 || (status & 0xf0) === 0xd0) {
+                offset++;
+            } else if ((status & 0xf0) === 0xa0 || (status & 0xf0) === 0xb0 || (status & 0xf0) === 0xe0) {
+                offset += 2;
+            } else if ((status & 0xf0) === 0x90) {
+                const pitch = midiBytes[offset++];
+                const velocity = midiBytes[offset++];
+                if (velocity > 0) {
+                    activeNote = { pitch, velocity };
+                } else if (activeNote) {
+                    trackDecoded.push({ pitch: activeNote.pitch, velocity: activeNote.velocity, duration: delta });
+                    noteIdx++;
+                    activeNote = null;
+                }
+            } else if ((status & 0xf0) === 0x80) {
+                const pitch = midiBytes[offset++];
+                offset++;
+                if (activeNote && activeNote.pitch === pitch) {
+                    trackDecoded.push({ pitch: activeNote.pitch, velocity: activeNote.velocity, duration: delta });
+                    noteIdx++;
+                    activeNote = null;
+                }
+            }
+
+            if (onProgress && Date.now() - lastProgressTime > 50) {
+                const pct = Math.round(((t / numTracks) + (offset / (trkEnd * numTracks))) * 100);
+                onProgress(Math.min(pct, 95));
+                lastProgressTime = Date.now();
+                await new Promise(r => setTimeout(r, 0));
+            }
+        }
+        decodedTracks.push(trackDecoded);
+        offset = trkEnd;
+    }
+
+    const CHUNK_SIZE = 2 * 1024 * 1024;
+    const decChunks = [];
+    let chunk = new Uint8Array(CHUNK_SIZE);
+    let chunkPos = 0;
+
+    const trackPtrs = [0, 0, 0, 0];
+    let m = 0;
+
+    while (true) {
+        let anyInChunk = false;
+        const chordIdx = Math.floor(m / 2) % 4;
+
+        for (let s = 0; s < 8; s++) {
+            const slot = SLOTS[s];
+            const t = slot.track;
+            if (t < decodedTracks.length && trackPtrs[t] < decodedTracks[t].length) {
+                anyInChunk = true;
+                const n = decodedTracks[t][trackPtrs[t]++];
+                const scale = CHORDS[chordIdx][slot.part];
+
+                const pitchIdx = scale.indexOf(n.pitch);
+                const durIdx = DURATIONS[slot.part].indexOf(n.duration);
+                const velIdx = VELOCITIES.indexOf(n.velocity);
+
+                if (pitchIdx !== -1 && durIdx !== -1 && velIdx !== -1) {
+                    if (chunkPos >= CHUNK_SIZE) {
+                        decChunks.push(chunk);
+                        chunk = new Uint8Array(CHUNK_SIZE);
+                        chunkPos = 0;
+                    }
+                    chunk[chunkPos++] = (pitchIdx << 4) | (durIdx << 2) | velIdx;
+                }
+            }
+        }
+        if (!anyInChunk) break;
+        m++;
+    }
+
+    if (chunkPos > 0) {
+        decChunks.push(chunk.subarray(0, chunkPos));
+    }
+
+    if (onProgress) onProgress(100);
+    return new Blob(decChunks);
 }
 
 async function sha256Hex(bytes) {
@@ -309,7 +614,7 @@ function hideProgress(boxId) {
     }
 }
 
-async function handleEncodeFile(file) {
+async function handleEncodeFile(file, isPolyphonic = true) {
     const errorEl = document.getElementById("encodeError");
     const metaEl = document.getElementById("encodeMeta");
     const downloadBtn = document.getElementById("downloadMidiBtn");
@@ -343,11 +648,14 @@ async function handleEncodeFile(file) {
 
         const packed = packFile(file.name, dataToPack);
 
-        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 55, "Encoding MIDI... 55%");
+        const modeStr = isPolyphonic ? "polyphonic" : "legacy";
+        const progressLabel = "Encoding MIDI...";
+        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 55, `${progressLabel} 55%`);
+
         const midiBlob = await encodeToMidi(packed, (pct) => {
             const mapped = 55 + Math.round(pct * 0.42);
-            setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", mapped, `Encoding MIDI... ${mapped}%`);
-        });
+            setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", mapped, `${progressLabel} ${mapped}%`);
+        }, modeStr);
 
         currentMidiBlob = midiBlob;
         currentMidiFilename = file.name.replace(/\.[^/.]+$/, "") + ".mid";
@@ -358,16 +666,20 @@ async function handleEncodeFile(file) {
         if (downloadBtn) downloadBtn.disabled = false;
         if (playBtn) playBtn.disabled = false;
 
+        const estDurationSec = isPolyphonic ? (packed.length / 8) * 2.4 : packed.length * 0.45;
+
         if (metaEl) {
             metaEl.innerHTML = `
                 <div><strong>File:</strong> ${file.name} (${fileBytes.length.toLocaleString()} bytes${isCompressed ? ` → compressed to ${dataToPack.length.toLocaleString()} bytes` : ""})</div>
-                <div><strong>MIDI:</strong> ${midiBlob.size.toLocaleString()} bytes (${formatNotes(packed.length)})</div>
+                <div><strong>Format:</strong> ${isPolyphonic ? "Harmonic Multi-Layer (Lossless Polyphonic)" : "Monophonic Pentatonic"}</div>
+                <div><strong>MIDI Size:</strong> ${midiBlob.size.toLocaleString()} bytes (${formatNotes(packed.length)})</div>
+                <div><strong>Estimated Duration:</strong> ~${formatTime(estDurationSec)}</div>
                 <div class="hash">SHA-256: ${originalHash}</div>
             `;
         }
 
         if (window.midiPlayer) {
-            const previewSlice = await midiBlob.slice(0, 1500000).arrayBuffer();
+            const previewSlice = await midiBlob.slice(0, 2000000).arrayBuffer();
             window.midiPlayer.loadMidi(new Uint8Array(previewSlice), packed.length);
             const trackInfo = document.getElementById("playerTrackInfo");
             if (trackInfo) {
@@ -390,18 +702,18 @@ async function handleDecodeFile(file) {
     if (downloadBtn) downloadBtn.disabled = true;
 
     try {
-        setProgress("decodeProgressBox", "decodeProgressBar", "decodeProgressText", 15, "Reading MIDI... 15%");
+        setProgress("decodeProgressBox", "decodeProgressBar", "decodeProgressText", 15, "Reading MIDI file... 15%");
         const buffer = await file.arrayBuffer();
         const midiBytes = new Uint8Array(buffer);
 
-        setProgress("decodeProgressBox", "decodeProgressBar", "decodeProgressText", 30, "Decoding notes... 30%");
+        setProgress("decodeProgressBox", "decodeProgressBar", "decodeProgressText", 30, "Decoding MIDI layers... 30%");
         let decodedBlob = await decodeFromMidi(midiBytes, (pct) => {
             const mapped = 30 + Math.round(pct * 0.4);
-            setProgress("decodeProgressBox", "decodeProgressBar", "decodeProgressText", mapped, `Decoding notes... ${mapped}%`);
+            setProgress("decodeProgressBox", "decodeProgressBar", "decodeProgressText", mapped, `Decoding layers... ${mapped}%`);
         });
 
         setProgress("decodeProgressBox", "decodeProgressBar", "decodeProgressText", 75, "Unpacking container... 75%");
-        
+
         const headerCheck = new Uint8Array(await decodedBlob.slice(0, 2).arrayBuffer());
         if (headerCheck.length >= 2 && headerCheck[0] === 0x1f && headerCheck[1] === 0x8b) {
             try {
@@ -445,7 +757,7 @@ async function handleDecodeFile(file) {
         }
 
         if (window.midiPlayer) {
-            const previewSlice = await file.slice(0, 1500000).arrayBuffer();
+            const previewSlice = await file.slice(0, 2000000).arrayBuffer();
             window.midiPlayer.loadMidi(new Uint8Array(previewSlice), Math.round(file.size / 8.5));
             const trackInfo = document.getElementById("playerTrackInfo");
             if (trackInfo) {
@@ -497,13 +809,15 @@ function initApp() {
     const encodeInput = document.getElementById("encodeInput");
     const downloadMidiBtn = document.getElementById("downloadMidiBtn");
     const playMidiBtn = document.getElementById("playMidiBtn");
+    const polyphonyToggle = document.getElementById("polyphonyToggle");
 
     if (encodeDrop && encodeInput) {
         encodeDrop.addEventListener("click", () => encodeInput.click());
         encodeInput.addEventListener("click", (e) => e.stopPropagation());
         encodeInput.addEventListener("change", (e) => {
             if (e.target.files && e.target.files[0]) {
-                handleEncodeFile(e.target.files[0]);
+                const isPoly = polyphonyToggle ? polyphonyToggle.checked : true;
+                handleEncodeFile(e.target.files[0], isPoly);
             }
         });
 
@@ -518,7 +832,8 @@ function initApp() {
             e.preventDefault();
             encodeDrop.classList.remove("dragover");
             if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                handleEncodeFile(e.dataTransfer.files[0]);
+                const isPoly = polyphonyToggle ? polyphonyToggle.checked : true;
+                handleEncodeFile(e.dataTransfer.files[0], isPoly);
             }
         });
     }
@@ -528,7 +843,7 @@ function initApp() {
             if (!currentMidiBlob) return;
             const a = document.createElement("a");
             a.href = URL.createObjectURL(currentMidiBlob);
-            a.download = currentMidiFilename || "song.mid";
+            a.download = currentMidiFilename || "music.mid";
             a.click();
             URL.revokeObjectURL(a.href);
         });
@@ -621,7 +936,6 @@ function initApp() {
     const playerTimeCurrent = document.getElementById("playerTimeCurrent");
     const playerTimeTotal = document.getElementById("playerTimeTotal");
     const playerVolume = document.getElementById("playerVolume");
-    const playerTrackInfo = document.getElementById("playerTrackInfo");
 
     if (window.midiPlayer && canvas) {
         window.midiPlayer.initCanvas(canvas);
@@ -635,20 +949,13 @@ function initApp() {
         };
 
         window.midiPlayer.onStateChange = (state, player) => {
-            if (playerPlayBtn) {
-                if (state === "playing") {
-                    playerPlayBtn.textContent = "⏸ Pause";
-                } else {
-                    playerPlayBtn.textContent = "▶ Play";
-                }
-            }
-            if (playMidiBtn) {
-                if (state === "playing") {
-                    playMidiBtn.textContent = "Pause";
-                } else {
-                    playMidiBtn.textContent = "Play";
-                }
-            }
+            const isPl = state === "playing";
+            const playText = isPl ? "⏸ Pause" : "▶ Play";
+            const simplePlayText = isPl ? "Pause" : "Play";
+
+            if (playerPlayBtn) playerPlayBtn.textContent = playText;
+            if (playMidiBtn) playMidiBtn.textContent = simplePlayText;
+
             if (state === "stopped") {
                 if (playerScrubber) playerScrubber.value = 0;
                 if (playerTimeCurrent) playerTimeCurrent.textContent = "0:00";
