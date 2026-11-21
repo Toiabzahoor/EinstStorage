@@ -32,3 +32,7 @@ Thank you. I wish you all a wonderful day, and I appreciate you taking your time
 ## NOTE
 
 This is not a very efficient encoding system, so expect some huge midi file sizes!
+
+## USE OF AI
+In this codebase , i used ai for mainly the following things
+I am not very proficient in JavaScript as you can see that my previous projects are mostly made in c++, so i used ai help with the syntax which is rather new to me. also , in order to make the frutiger eco theme , I used an ai generated image as using an internet image might cause issues with the author. the whole midi idea and the execution of the idea , was entirely my own due to my friend being a musical artist so that gave me the idea. 
