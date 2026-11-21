@@ -53,15 +53,18 @@ const REST_DELAYS = {
     harp: [240, 360, 480, 600]
 };
 
-const SLOTS = [
-    { track: 0, part: "bass" },
-    { track: 1, part: "harmony" },
-    { track: 1, part: "harmony" },
-    { track: 2, part: "melody" },
-    { track: 2, part: "melody" },
-    { track: 2, part: "melody" },
-    { track: 3, part: "harp" },
-    { track: 3, part: "harp" }
+const TRACK_SLOTS = [
+    [ { s: 0, part: "bass" } ],
+    [ { s: 1, part: "harmony" }, { s: 2, part: "harmony" } ],
+    [ { s: 3, part: "melody" }, { s: 4, part: "melody" }, { s: 5, part: "melody" } ],
+    [ { s: 6, part: "harp" }, { s: 7, part: "harp" } ]
+];
+
+const TRACK_SLOT_PARTS = [
+    ["bass"],
+    ["harmony", "harmony"],
+    ["melody", "melody", "melody"],
+    ["harp", "harp"]
 ];
 
 const PROGRAMS = [42, 48, 40, 46];
@@ -203,35 +206,34 @@ async function encodeLegacyToMidi(blob, onProgress) {
 
 async function encodePolyphonicToMidi(blob, onProgress) {
     const total = blob.length;
-    const trackBytes = [[], [], [], []];
-
-    for (let i = 0; i < total; i++) {
-        const slot = SLOTS[i % 8];
-        trackBytes[slot.track].push({ byte: blob[i], chunkIdx: Math.floor(i / 8), part: slot.part });
-    }
-
+    const totalChunks = Math.ceil(total / 8);
     const chunks = [];
+
     const headerBuf = new Uint8Array(14);
     headerBuf.set([0x4d, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00, 0x04, 0x01, 0xe0], 0);
     chunks.push(headerBuf);
 
     let lastProgressTime = Date.now();
+    const CHUNK_SIZE = 2 * 1024 * 1024;
 
     for (let t = 0; t < 4; t++) {
-        const items = trackBytes[t];
-        const CHUNK_SIZE = 1024 * 1024;
-        let chunk = new Uint8Array(CHUNK_SIZE);
-        let chunkPos = 0;
+        const slots = TRACK_SLOTS[t];
+        const numSlots = slots.length;
 
         let trkDataLen = (t === 0 ? 7 : 0) + 3 + 4;
-        for (let i = 0; i < items.length; i++) {
-            const item = items[i];
-            const durIdx = (item.byte >> 2) & 0x03;
-            const duration = DURATIONS[item.part][durIdx];
-            const restDelay = (i === 0) ? (t * 120) : REST_DELAYS[item.part][durIdx];
-            const durVlqLen = duration < 128 ? 1 : (duration < 16384 ? 2 : 3);
-            const delayVlqLen = restDelay < 128 ? 1 : (restDelay < 16384 ? 2 : 3);
-            trkDataLen += delayVlqLen + 3 + durVlqLen + 3;
+        let isFirstNote = true;
+        for (let m = 0; m < totalChunks; m++) {
+            for (let si = 0; si < numSlots; si++) {
+                const idx = m * 8 + slots[si].s;
+                if (idx >= total) break;
+                const durIdx = (blob[idx] >> 2) & 0x03;
+                const duration = DURATIONS[slots[si].part][durIdx];
+                const restDelay = isFirstNote ? (t * 120) : REST_DELAYS[slots[si].part][durIdx];
+                isFirstNote = false;
+                const durVlqLen = duration < 128 ? 1 : 2;
+                const delayVlqLen = restDelay < 128 ? 1 : 2;
+                trkDataLen += delayVlqLen + 3 + durVlqLen + 3;
+            }
         }
 
         const trkHeader = new Uint8Array(8);
@@ -243,6 +245,9 @@ async function encodePolyphonicToMidi(blob, onProgress) {
             trkDataLen & 0xff
         ], 0);
         chunks.push(trkHeader);
+
+        let chunk = new Uint8Array(CHUNK_SIZE);
+        let chunkPos = 0;
 
         if (t === 0) {
             chunk[chunkPos++] = 0x00;
@@ -258,45 +263,58 @@ async function encodePolyphonicToMidi(blob, onProgress) {
         chunk[chunkPos++] = 0xc0 | t;
         chunk[chunkPos++] = PROGRAMS[t];
 
-        for (let i = 0; i < items.length; i++) {
-            if (chunkPos + 18 >= CHUNK_SIZE) {
-                chunks.push(chunk.subarray(0, chunkPos));
-                chunk = new Uint8Array(CHUNK_SIZE);
-                chunkPos = 0;
+        isFirstNote = true;
+        for (let m = 0; m < totalChunks; m++) {
+            const chordIdx = Math.floor(m / 2) % 4;
+            const chordsForChord = CHORDS[chordIdx];
+
+            for (let si = 0; si < numSlots; si++) {
+                const idx = m * 8 + slots[si].s;
+                if (idx >= total) break;
+
+                if (chunkPos + 18 >= CHUNK_SIZE) {
+                    chunks.push(chunk.subarray(0, chunkPos));
+                    chunk = new Uint8Array(CHUNK_SIZE);
+                    chunkPos = 0;
+                }
+
+                const b = blob[idx];
+                const part = slots[si].part;
+                const scale = chordsForChord[part];
+
+                const pitch = scale[(b >> 4) & 0x0f];
+                const durIdx = (b >> 2) & 0x03;
+                const duration = DURATIONS[part][durIdx];
+                const velocity = VELOCITIES[b & 0x03];
+                const restDelay = isFirstNote ? (t * 120) : REST_DELAYS[part][durIdx];
+                isFirstNote = false;
+
+                if (restDelay < 128) {
+                    chunk[chunkPos++] = restDelay;
+                } else {
+                    chunk[chunkPos++] = (restDelay >> 7) | 0x80;
+                    chunk[chunkPos++] = restDelay & 0x7f;
+                }
+
+                chunk[chunkPos++] = 0x90 | t;
+                chunk[chunkPos++] = pitch;
+                chunk[chunkPos++] = velocity;
+
+                if (duration < 128) {
+                    chunk[chunkPos++] = duration;
+                } else {
+                    chunk[chunkPos++] = (duration >> 7) | 0x80;
+                    chunk[chunkPos++] = duration & 0x7f;
+                }
+
+                chunk[chunkPos++] = 0x80 | t;
+                chunk[chunkPos++] = pitch;
+                chunk[chunkPos++] = 0x00;
             }
 
-            const item = items[i];
-            const b = item.byte;
-            const chordIdx = Math.floor(item.chunkIdx / 2) % 4;
-            const scale = CHORDS[chordIdx][item.part];
-
-            const pitch = scale[(b >> 4) & 0x0f];
-            const durIdx = (b >> 2) & 0x03;
-            const duration = DURATIONS[item.part][durIdx];
-            const velocity = VELOCITIES[b & 0x03];
-            const restDelay = (i === 0) ? (t * 120) : REST_DELAYS[item.part][durIdx];
-
-            const delayBytes = writeVLQ(restDelay);
-            for (let k = 0; k < delayBytes.length; k++) {
-                chunk[chunkPos++] = delayBytes[k];
-            }
-
-            chunk[chunkPos++] = 0x90 | t;
-            chunk[chunkPos++] = pitch;
-            chunk[chunkPos++] = velocity;
-
-            const durBytes = writeVLQ(duration);
-            for (let k = 0; k < durBytes.length; k++) {
-                chunk[chunkPos++] = durBytes[k];
-            }
-
-            chunk[chunkPos++] = 0x80 | t;
-            chunk[chunkPos++] = pitch;
-            chunk[chunkPos++] = 0x00;
-
-            if (onProgress && Date.now() - lastProgressTime > 50) {
-                const completedBytes = t * Math.floor(total / 4) + i;
-                const pct = Math.round((completedBytes / total) * 100);
+            if (onProgress && Date.now() - lastProgressTime > 40) {
+                const fraction = (t + (m / totalChunks)) / 4;
+                const pct = Math.min(99, Math.round(fraction * 100));
                 onProgress(pct);
                 lastProgressTime = Date.now();
                 await new Promise(r => setTimeout(r, 0));
@@ -424,11 +442,12 @@ async function decodePolyphonicFromMidi(midiBytes, onProgress) {
     const numTracks = (midiBytes[10] << 8) | midiBytes[11];
     offset = 14;
 
-    const decodedTracks = [];
+    const decodedTrackChunks = [[], [], [], []];
     const view = new DataView(midiBytes.buffer, midiBytes.byteOffset, midiBytes.byteLength);
     let lastProgressTime = Date.now();
+    const CHUNK_SIZE = 2 * 1024 * 1024;
 
-    for (let t = 0; t < numTracks; t++) {
+    for (let t = 0; t < Math.min(numTracks, 4); t++) {
         if (offset >= midiBytes.length) break;
         const trkMagic = String.fromCharCode(...midiBytes.slice(offset, offset + 4));
         if (trkMagic !== "MTrk") throw new Error("Missing MTrk chunk at track " + t);
@@ -436,20 +455,37 @@ async function decodePolyphonicFromMidi(midiBytes, onProgress) {
         offset += 8;
         const trkEnd = offset + trkLen;
 
-        const trackDecoded = [];
-        let noteIdx = 0;
-        let activeNote = null;
+        const parts = TRACK_SLOT_PARTS[t];
+        const numSlots = parts.length;
+        let noteCount = 0;
+        let activePitch = -1;
+        let activeVel = 0;
+
+        let curChunk = new Uint8Array(CHUNK_SIZE);
+        let curChunkPos = 0;
 
         while (offset < trkEnd && offset < midiBytes.length) {
-            const vlq = readVLQ(midiBytes, offset);
-            const delta = vlq.value;
-            offset = vlq.offset;
+            let vlqVal = 0;
+            let b;
+            do {
+                if (offset >= midiBytes.length) break;
+                b = midiBytes[offset++];
+                vlqVal = (vlqVal << 7) | (b & 0x7f);
+            } while (b & 0x80);
 
+            if (offset >= midiBytes.length) break;
+            const delta = vlqVal;
             const status = midiBytes[offset++];
+
             if (status === 0xff) {
                 const metaType = midiBytes[offset++];
-                const metaLen = readVLQ(midiBytes, offset);
-                offset = metaLen.offset + metaLen.value;
+                let metaLen = 0;
+                do {
+                    if (offset >= midiBytes.length) break;
+                    b = midiBytes[offset++];
+                    metaLen = (metaLen << 7) | (b & 0x7f);
+                } while (b & 0x80);
+                offset += metaLen;
                 if (metaType === 0x2f) break;
             } else if ((status & 0xf0) === 0xc0 || (status & 0xf0) === 0xd0) {
                 offset++;
@@ -459,73 +495,111 @@ async function decodePolyphonicFromMidi(midiBytes, onProgress) {
                 const pitch = midiBytes[offset++];
                 const velocity = midiBytes[offset++];
                 if (velocity > 0) {
-                    activeNote = { pitch, velocity };
-                } else if (activeNote) {
-                    trackDecoded.push({ pitch: activeNote.pitch, velocity: activeNote.velocity, duration: delta });
-                    noteIdx++;
-                    activeNote = null;
+                    activePitch = pitch;
+                    activeVel = velocity;
+                } else if (activePitch !== -1) {
+                    const chunkIdx = Math.floor(noteCount / numSlots);
+                    const slotInTrack = noteCount % numSlots;
+                    const part = parts[slotInTrack];
+                    const chordIdx = Math.floor(chunkIdx / 2) % 4;
+                    const scale = CHORDS[chordIdx][part];
+
+                    const pitchIdx = scale.indexOf(activePitch);
+                    const durIdx = DURATIONS[part].indexOf(delta);
+                    const velIdx = VELOCITIES.indexOf(activeVel);
+
+                    if (pitchIdx !== -1 && durIdx !== -1 && velIdx !== -1) {
+                        if (curChunkPos >= CHUNK_SIZE) {
+                            decodedTrackChunks[t].push(curChunk.subarray(0, curChunkPos));
+                            curChunk = new Uint8Array(CHUNK_SIZE);
+                            curChunkPos = 0;
+                        }
+                        curChunk[curChunkPos++] = (pitchIdx << 4) | (durIdx << 2) | velIdx;
+                    }
+                    noteCount++;
+                    activePitch = -1;
                 }
             } else if ((status & 0xf0) === 0x80) {
                 const pitch = midiBytes[offset++];
                 offset++;
-                if (activeNote && activeNote.pitch === pitch) {
-                    trackDecoded.push({ pitch: activeNote.pitch, velocity: activeNote.velocity, duration: delta });
-                    noteIdx++;
-                    activeNote = null;
+                if (activePitch !== -1 && activePitch === pitch) {
+                    const chunkIdx = Math.floor(noteCount / numSlots);
+                    const slotInTrack = noteCount % numSlots;
+                    const part = parts[slotInTrack];
+                    const chordIdx = Math.floor(chunkIdx / 2) % 4;
+                    const scale = CHORDS[chordIdx][part];
+
+                    const pitchIdx = scale.indexOf(activePitch);
+                    const durIdx = DURATIONS[part].indexOf(delta);
+                    const velIdx = VELOCITIES.indexOf(activeVel);
+
+                    if (pitchIdx !== -1 && durIdx !== -1 && velIdx !== -1) {
+                        if (curChunkPos >= CHUNK_SIZE) {
+                            decodedTrackChunks[t].push(curChunk.subarray(0, curChunkPos));
+                            curChunk = new Uint8Array(CHUNK_SIZE);
+                            curChunkPos = 0;
+                        }
+                        curChunk[curChunkPos++] = (pitchIdx << 4) | (durIdx << 2) | velIdx;
+                    }
+                    noteCount++;
+                    activePitch = -1;
                 }
             }
 
-            if (onProgress && Date.now() - lastProgressTime > 50) {
-                const pct = Math.round(((t / numTracks) + (offset / (trkEnd * numTracks))) * 100);
-                onProgress(Math.min(pct, 95));
+            if (onProgress && Date.now() - lastProgressTime > 40) {
+                const trkFraction = (t + ((offset - (trkEnd - trkLen)) / trkLen)) / numTracks;
+                const pct = Math.min(90, Math.round(trkFraction * 90));
+                onProgress(pct);
                 lastProgressTime = Date.now();
                 await new Promise(r => setTimeout(r, 0));
             }
         }
-        decodedTracks.push(trackDecoded);
+
+        if (curChunkPos > 0) {
+            decodedTrackChunks[t].push(curChunk.subarray(0, curChunkPos));
+        }
         offset = trkEnd;
     }
 
-    const CHUNK_SIZE = 2 * 1024 * 1024;
-    const decChunks = [];
-    let chunk = new Uint8Array(CHUNK_SIZE);
-    let chunkPos = 0;
+    const trackBuffers = decodedTrackChunks.map(chunks => {
+        let len = 0;
+        for (let c of chunks) len += c.length;
+        const merged = new Uint8Array(len);
+        let pos = 0;
+        for (let c of chunks) {
+            merged.set(c, pos);
+            pos += c.length;
+        }
+        return merged;
+    });
 
+    const decChunks = [];
+    let outChunk = new Uint8Array(CHUNK_SIZE);
+    let outPos = 0;
     const trackPtrs = [0, 0, 0, 0];
-    let m = 0;
 
     while (true) {
-        let anyInChunk = false;
-        const chordIdx = Math.floor(m / 2) % 4;
-
-        for (let s = 0; s < 8; s++) {
-            const slot = SLOTS[s];
-            const t = slot.track;
-            if (t < decodedTracks.length && trackPtrs[t] < decodedTracks[t].length) {
-                anyInChunk = true;
-                const n = decodedTracks[t][trackPtrs[t]++];
-                const scale = CHORDS[chordIdx][slot.part];
-
-                const pitchIdx = scale.indexOf(n.pitch);
-                const durIdx = DURATIONS[slot.part].indexOf(n.duration);
-                const velIdx = VELOCITIES.indexOf(n.velocity);
-
-                if (pitchIdx !== -1 && durIdx !== -1 && velIdx !== -1) {
-                    if (chunkPos >= CHUNK_SIZE) {
-                        decChunks.push(chunk);
-                        chunk = new Uint8Array(CHUNK_SIZE);
-                        chunkPos = 0;
+        let any = false;
+        for (let t = 0; t < 4; t++) {
+            const numSlots = TRACK_SLOT_PARTS[t].length;
+            const buf = trackBuffers[t];
+            for (let s = 0; s < numSlots; s++) {
+                if (trackPtrs[t] < buf.length) {
+                    any = true;
+                    if (outPos >= CHUNK_SIZE) {
+                        decChunks.push(outChunk.subarray(0, outPos));
+                        outChunk = new Uint8Array(CHUNK_SIZE);
+                        outPos = 0;
                     }
-                    chunk[chunkPos++] = (pitchIdx << 4) | (durIdx << 2) | velIdx;
+                    outChunk[outPos++] = buf[trackPtrs[t]++];
                 }
             }
         }
-        if (!anyInChunk) break;
-        m++;
+        if (!any) break;
     }
 
-    if (chunkPos > 0) {
-        decChunks.push(chunk.subarray(0, chunkPos));
+    if (outPos > 0) {
+        decChunks.push(outChunk.subarray(0, outPos));
     }
 
     if (onProgress) onProgress(100);
@@ -631,17 +705,20 @@ async function handleEncodeFile(file, isPolyphonic = true) {
     }
 
     try {
-        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 15, "Reading file... 15%");
+        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 10, "Reading file... 10%");
+        await new Promise(r => setTimeout(r, 0));
         const fileBuffer = await file.arrayBuffer();
         const fileBytes = new Uint8Array(fileBuffer);
 
-        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 30, "Calculating SHA-256... 30%");
+        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 25, "Calculating SHA-256... 25%");
+        await new Promise(r => setTimeout(r, 0));
         const originalHash = await sha256Hex(fileBytes);
 
         let dataToPack = fileBytes;
         let isCompressed = false;
         if (gzipToggle && gzipToggle.checked) {
-            setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 45, "Compressing with Gzip... 45%");
+            setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 40, "Compressing with Gzip... 40%");
+            await new Promise(r => setTimeout(r, 0));
             dataToPack = await gzipCompress(fileBytes);
             isCompressed = true;
         }
@@ -650,10 +727,11 @@ async function handleEncodeFile(file, isPolyphonic = true) {
 
         const modeStr = isPolyphonic ? "polyphonic" : "legacy";
         const progressLabel = "Encoding MIDI...";
-        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 55, `${progressLabel} 55%`);
+        setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", 50, `${progressLabel} 50%`);
+        await new Promise(r => setTimeout(r, 0));
 
         const midiBlob = await encodeToMidi(packed, (pct) => {
-            const mapped = 55 + Math.round(pct * 0.42);
+            const mapped = 50 + Math.round(pct * 0.48);
             setProgress("encodeProgressBox", "encodeProgressBar", "encodeProgressText", mapped, `${progressLabel} ${mapped}%`);
         }, modeStr);
 
